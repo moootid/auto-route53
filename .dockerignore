@@ -1,0 +1,13 @@
+# .dockerignore
+
+# Exclude git repository files
+.git
+.gitignore
+
+# Exclude Docker and Go module files that aren't needed in the image itself
+Dockerfile
+docker-compose.yml
+
+# Exclude environment files and local state data
+.env
+app_data/

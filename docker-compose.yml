@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  go-aws-dns-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: go-aws-dns-updater:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    # FIX: Mount the local app_data directory into the container's /app/data directory.
+    # This keeps the application binary safe in /app while persisting data in /app/data.
+    volumes:
+      - ./app_data:/app/data
