@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   go-aws-dns-updater:
     build:
