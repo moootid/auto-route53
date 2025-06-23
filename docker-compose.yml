@@ -35,11 +35,6 @@ services:
       - '81:81'    # Admin UI
     # Environment variables for NPM's database connection
     environment:
-      DB_MYSQL_HOST: "npm-db"
-      DB_MYSQL_PORT: 3306
-      DB_MYSQL_USER: "npm"
-      DB_MYSQL_PASSWORD: "${NPM_DB_PASSWORD}"
-      DB_MYSQL_NAME: "npm"
       INITIAL_ADMIN_EMAIL: "${NPM_IDENTITY}"
       INITIAL_ADMIN_PASSWORD: "${NPM_SECRET}"
       # Set to 'true' to disable healthchecks on startup
@@ -50,23 +45,8 @@ services:
       - ./npm_letsencrypt:/etc/letsencrypt
     networks:
       - npm_network
-    depends_on:
-      - npm-db
 
-  # The database for Nginx Proxy Manager
-  npm-db:
-    image: 'jc21/mariadb-aria:latest'
-    container_name: nginx-proxy-manager-db
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: "${NPM_DB_ROOT_PASSWORD}"
-      MYSQL_DATABASE: "npm"
-      MYSQL_USER: "npm"
-      MYSQL_PASSWORD: "${NPM_DB_PASSWORD}"
-    volumes:
-      - ./npm_db_data:/var/lib/mysql
-    networks:
-      - npm_network
+
 
 # Define the shared network
 networks:
