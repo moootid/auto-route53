@@ -1,13 +1,11 @@
-version: '3.8'
-
 services:
   # Our Go application that manages DNS, Certs, and now NPM
-  aws-dns-updater:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # image: go-aws-dns-updater:latest
-    container_name: aws-dns-updater
+  auto-route53:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: auto-route53:latest
+    container_name: auto-route53
     # This ensures it starts after NPM is up, though it has its own retry logic
     depends_on:
       - npm-app
