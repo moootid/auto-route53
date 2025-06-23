@@ -14,8 +14,15 @@ services:
     # Restart if it fails
     restart: unless-stopped
     # Load environment variables from the .env file
-    env_file:
-      - .env
+    environment:
+      AWS_ACCESS_KEY_ID : "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY : "${AWS_SECRET_ACCESS_KEY}"
+      AWS_REGION : "${AWS_REGION}"
+      NPM_IDENTITY : "${NPM_IDENTITY}"
+      NPM_SECRET : "${NPM_SECRET}"
+      NPM_URL : "${NPM_URL}"
+      RECORDS_TO_UPDATE : "${RECORDS_TO_UPDATE}"
+      SLEEP_TIME : "${SLEEP_TIME}"
     # The updater needs to be on the same network to talk to the NPM API
     networks:
       - npm_network
