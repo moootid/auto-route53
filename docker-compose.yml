@@ -1,13 +1,73 @@
+version: '3.8'
+
 services:
-  go-aws-dns-updater:
+  # Our Go application that manages DNS, Certs, and now NPM
+  aws-dns-updater:
     build:
       context: .
       dockerfile: Dockerfile
-    image: go-aws-dns-updater:latest
+    # image: go-aws-dns-updater:latest
+    container_name: aws-dns-updater
+    # This ensures it starts after NPM is up, though it has its own retry logic
+    depends_on:
+      - npm-app
+    # Restart if it fails
     restart: unless-stopped
+    # Load environment variables from the .env file
     env_file:
       - .env
-    # FIX: Mount the local app_data directory into the container's /app/data directory.
-    # This keeps the application binary safe in /app while persisting data in /app/data.
+    # The updater needs to be on the same network to talk to the NPM API
+    networks:
+      - npm_network
+    # Persist its own state files (IP and Cert ARNs)
     volumes:
-      - ./app_data:/app/data
+      - ./updater_data:/app/data
+
+  # The Nginx Proxy Manager application
+  npm-app:
+    image: 'jc21/nginx-proxy-manager:latest'
+    container_name: nginx-proxy-manager-app
+    restart: unless-stopped
+    # Ports for web traffic and the admin UI
+    ports:
+      - '80:80'    # Public HTTP Port
+      - '443:443'  # Public HTTPS Port
+      - '81:81'    # Admin UI
+    # Environment variables for NPM's database connection
+    environment:
+      DB_MYSQL_HOST: "npm-db"
+      DB_MYSQL_PORT: 3306
+      DB_MYSQL_USER: "npm"
+      DB_MYSQL_PASSWORD: "${NPM_DB_PASSWORD}"
+      DB_MYSQL_NAME: "npm"
+      INITIAL_ADMIN_EMAIL: "${NPM_IDENTITY}"
+      INITIAL_ADMIN_PASSWORD: "${NPM_SECRET}"
+      # Set to 'true' to disable healthchecks on startup
+      DISABLE_IPV6: 'true'
+    volumes:
+      # Persist NPM's configuration and certificate data
+      - ./npm_data:/data
+      - ./npm_letsencrypt:/etc/letsencrypt
+    networks:
+      - npm_network
+    depends_on:
+      - npm-db
+
+  # The database for Nginx Proxy Manager
+  npm-db:
+    image: 'jc21/mariadb-aria:latest'
+    container_name: nginx-proxy-manager-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${NPM_DB_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "npm"
+      MYSQL_USER: "npm"
+      MYSQL_PASSWORD: "${NPM_DB_PASSWORD}"
+    volumes:
+      - ./npm_db_data:/var/lib/mysql
+    networks:
+      - npm_network
+
+# Define the shared network
+networks:
+  npm_network:
