@@ -5,7 +5,9 @@ go 1.24.4
 require (
 	github.com/aws/aws-sdk-go-v2 v1.36.5
 	github.com/aws/aws-sdk-go-v2/config v1.29.17
+	github.com/aws/aws-sdk-go-v2/service/acm v1.33.0
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.52.2
+	github.com/go-resty/resty/v2 v2.16.5
 )
 
 require (
@@ -20,4 +22,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.34.0 // indirect
 	github.com/aws/smithy-go v1.22.4 // indirect
+	golang.org/x/net v0.33.0 // indirect
 )
