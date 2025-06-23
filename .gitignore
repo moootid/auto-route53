@@ -24,3 +24,6 @@ go.work.sum
 # env file
 .env
 app_data
+/npm_data
+/npm_db_data
+/updater_data
