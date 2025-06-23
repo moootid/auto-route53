@@ -14,34 +14,61 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/acm"
-	acmtypes "github.com/aws/aws-sdk-go-v2/service/acm/types"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+	"github.com/go-resty/resty/v2"
 )
 
-// RecordConfig defines the structure for each DNS record to be updated.
-// The `json:"tls,omitempty"` tag makes the field optional and default to false if not present.
+// --- Struct Definitions ---
+
 type RecordConfig struct {
-	ZoneID     string `json:"zone_id"`
-	RecordName string `json:"record_name"`
-	TLS        bool   `json:"tls,omitempty"`
+	ZoneID          string `json:"zone_id"`
+	RecordName      string `json:"record_name"`
+	TLS             bool   `json:"tls,omitempty"`
+	Port            int    `json:"port,omitempty"`
+	RedirectToHttps bool   `json:"redirect_to_https,omitempty"`
 }
 
-// AppConfig holds the overall application configuration.
 type AppConfig struct {
 	SleepTime       time.Duration
 	RecordsToUpdate []RecordConfig
+	NPMBaseURL      string
+	NPMIdentity     string
+	NPMSecret       string
+	ForwardHost     string
+}
+
+// Structs for NPM API
+type NpmAuthResponse struct {
+	Token string `json:"token"`
+}
+type NpmProxyHost struct {
+	ID          int      `json:"id"`
+	DomainNames []string `json:"domain_names"`
+	ForwardHost string   `json:"forward_host"`
+	ForwardPort int      `json:"forward_port"`
 }
 
 const (
-	ipStateFile        = "data/last_ip.txt"
-	// Certificate state file will now be named based on the domain
-	certStateFilePrefix = "data/cert_arn_"
-	certValidationWait  = 15 * time.Minute
+	ipStateFile = "data/last_ip.txt"
 )
 
+// --- Shared Helper Functions ---
+
+func getStoredString(filename string) (string, error) {
+	data, err := os.ReadFile(filename)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return string(data), err
+}
+
+func storeString(filename, value string) error {
+	return os.WriteFile(filename, []byte(value), 0644)
+}
+
 // --- DDNS Functions ---
+
 func getPublicIP() (string, error) {
 	resp, err := http.Get("https://checkip.amazonaws.com/")
 	if err != nil {
@@ -58,20 +85,8 @@ func getPublicIP() (string, error) {
 	return strings.TrimSpace(string(ipBytes)), nil
 }
 
-func getStoredString(filename string) (string, error) {
-	data, err := os.ReadFile(filename)
-	if os.IsNotExist(err) {
-		return "", nil // Not an error, just doesn't exist yet
-	}
-	return string(data), err
-}
-
-func storeString(filename, value string) error {
-	return os.WriteFile(filename, []byte(value), 0644)
-}
-
-func updateRoute53Record(ctx context.Context, client *route53.Client, zoneID, recordName, recordType, value string) error {
-	log.Printf("Attempting to UPSERT %s record for %s in Zone ID %s...", recordType, recordName, zoneID)
+func updateRoute53Record(ctx context.Context, client *route53.Client, zoneID, recordName, value string) error {
+	log.Printf("Attempting to UPSERT A record for %s in Zone ID %s...", recordName, zoneID)
 	input := &route53.ChangeResourceRecordSetsInput{
 		HostedZoneId: aws.String(zoneID),
 		ChangeBatch: &r53types.ChangeBatch{
@@ -81,7 +96,7 @@ func updateRoute53Record(ctx context.Context, client *route53.Client, zoneID, re
 					Action: r53types.ChangeActionUpsert,
 					ResourceRecordSet: &r53types.ResourceRecordSet{
 						Name: aws.String(recordName),
-						Type: r53types.RRType(recordType),
+						Type: r53types.RRTypeA,
 						TTL:  aws.Int64(300),
 						ResourceRecords: []r53types.ResourceRecord{
 							{Value: aws.String(value)},
@@ -99,125 +114,114 @@ func updateRoute53Record(ctx context.Context, client *route53.Client, zoneID, re
 	return nil
 }
 
+// --- Nginx Proxy Manager Functions ---
 
-// --- Certificate Management Functions ---
-
-func getCertStateFileName(domainName string) string {
-	// Sanitize domain name for filename
-	sanitized := strings.ReplaceAll(domainName, "*", "wildcard")
-	sanitized = strings.ReplaceAll(sanitized, ".", "_")
-	return certStateFilePrefix + sanitized + ".txt"
+type NpmClient struct {
+	client    *resty.Client
+	authToken string
 }
 
-func findExistingCertificate(ctx context.Context, client *acm.Client, domainName string) (string, error) {
-	log.Printf("CERT [%s]: Checking for existing certificate", domainName)
-	paginator := acm.NewListCertificatesPaginator(client, &acm.ListCertificatesInput{
-		CertificateStatuses: []acmtypes.CertificateStatus{acmtypes.CertificateStatusIssued},
-	})
+func NewNpmClient(baseURL, identity, secret string) (*NpmClient, error) {
+	npm := &NpmClient{
+		client: resty.New().SetBaseURL(baseURL).SetDisableWarn(true),
+	}
+	authPayload := map[string]string{"identity": identity, "secret": secret}
+	var authResponse NpmAuthResponse
 
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to list certificates: %w", err)
+	for i := 0; i < 5; i++ {
+		resp, err := npm.client.R().
+			SetHeader("Content-Type", "application/json").
+			SetBody(authPayload).
+			SetResult(&authResponse).
+			Post("/api/tokens")
+		if err == nil && resp.IsSuccess() {
+			npm.authToken = authResponse.Token
+			log.Println("NPM: Successfully authenticated with Nginx Proxy Manager.")
+			return npm, nil
 		}
-		for _, cert := range page.CertificateSummaryList {
-			if *cert.DomainName == domainName {
-				log.Printf("CERT [%s]: Found existing, issued certificate with ARN: %s", domainName, *cert.CertificateArn)
-				return *cert.CertificateArn, nil
+		log.Printf("NPM: Authentication failed (attempt %d/5), retrying in 15 seconds... Status: %s", i+1, resp.Status())
+		// Log URL and body for debugging
+		log.Printf("NPM: Request URL: %s, Body: %s", baseURL, authPayload)
+		time.Sleep(15 * time.Second)
+	}
+	return nil, fmt.Errorf("could not authenticate with Nginx Proxy Manager after several retries")
+}
+
+func (npm *NpmClient) findExistingProxyHost(domainName string) (*NpmProxyHost, error) {
+	var hosts []NpmProxyHost
+	resp, err := npm.client.R().SetAuthToken(npm.authToken).SetResult(&hosts).Get("/api/nginx/proxy-hosts")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list proxy hosts: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("failed to list proxy hosts, status: %s", resp.Status())
+	}
+	for i := range hosts {
+		for _, dn := range hosts[i].DomainNames {
+			if dn == domainName {
+				log.Printf("NPM [%s]: Found existing proxy host with ID %d.", domainName, hosts[i].ID)
+				return &hosts[i], nil
 			}
 		}
 	}
-	log.Printf("CERT [%s]: No existing issued certificate found.", domainName)
-	return "", nil
+	return nil, nil // Not found
 }
 
-// manageCertificateLifecycle handles the process for a single domain.
-func manageCertificateLifecycle(ctx context.Context, record RecordConfig, r53Client *route53.Client, acmClient *acm.Client) {
-	domainName := record.RecordName
-	log.Printf("CERT [%s]: Starting certificate management process.", domainName)
-	certStateFile := getCertStateFileName(domainName)
+func (npm *NpmClient) createProxyHost(record RecordConfig, forwardHost string) error {
+	log.Printf("NPM [%s]: Creating new proxy host pointing to %s:%d.", record.RecordName, forwardHost, record.Port)
 
-	// 1. Check local state
-	arn, err := getStoredString(certStateFile)
-	if err != nil {
-		log.Printf("CERT [%s] ERROR: Could not read stored ARN: %v", domainName, err)
-		return
-	}
-	if arn != "" {
-		log.Printf("CERT [%s]: Found stored ARN. Process complete.", domainName)
-		return
+	payload := map[string]interface{}{
+		"domain_names":            []string{record.RecordName},
+		"forward_scheme":          "http",
+		"forward_host":            forwardHost,
+		"forward_port":            record.Port,
+		"allow_websocket_upgrade": true,
+		"block_exploits":          true,
+		"hsts_enabled":            record.RedirectToHttps,
+		"hsts_subdomains":         record.RedirectToHttps,
+		"ssl_forced":              record.RedirectToHttps,
 	}
 
-	// 2. Check AWS for existing certificate
-	arn, err = findExistingCertificate(ctx, acmClient, domainName)
-	if err != nil {
-		log.Printf("CERT [%s] ERROR: Could not check for existing certificate: %v", domainName, err)
-		return
+	// If TLS is requested, tell NPM to fetch a new Let's Encrypt certificate.
+	if record.TLS {
+		log.Printf("NPM [%s]: Requesting a new Let's Encrypt certificate.", record.RecordName)
+		payload["certificate_id"] = "new"
+		payload["hsts_enabled"] = true
+		payload["hsts_subdomains"] = true
+		payload["ssl_forced"] = true
 	}
-	if arn != "" {
-		if err := storeString(certStateFile, arn); err != nil {
-			log.Printf("CERT [%s] ERROR: Found existing cert but failed to store its ARN: %v", domainName, err)
-		}
-		return
-	}
-	
-	// 3. Request a new certificate
-	log.Printf("CERT [%s]: Requesting new certificate...", domainName)
-	reqOut, err := acmClient.RequestCertificate(ctx, &acm.RequestCertificateInput{
-		DomainName:       aws.String(domainName),
-		ValidationMethod: acmtypes.ValidationMethodDns,
-	})
-	if err != nil {
-		log.Printf("CERT [%s] ERROR: Failed to request certificate: %v", domainName, err)
-		return
-	}
-	certArn := *reqOut.CertificateArn
-	log.Printf("CERT [%s]: Certificate requested. ARN: %s. Waiting for validation details...", domainName, certArn)
 
-	// 4. Wait for validation details and perform DNS validation
-	var validationOption *acmtypes.DomainValidation
-	for start := time.Now(); time.Since(start) < certValidationWait; {
-		descOut, err := acmClient.DescribeCertificate(ctx, &acm.DescribeCertificateInput{CertificateArn: &certArn})
+	resp, err := npm.client.R().
+		SetAuthToken(npm.authToken).
+		SetBody(payload).
+		Post("/api/nginx/proxy-hosts")
+
+	if err != nil {
+		return fmt.Errorf("failed to create proxy host: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return fmt.Errorf("failed to create proxy host, status: %s, body: %s", resp.Status(), resp.String())
+	}
+
+	log.Printf("NPM [%s]: Successfully created proxy host.", record.RecordName)
+	return nil
+}
+
+func manageNginxProxy(record RecordConfig, npmClient *NpmClient, forwardHost string) {
+	log.Printf("NPM [%s]: Starting proxy management.", record.RecordName)
+	existingHost, err := npmClient.findExistingProxyHost(record.RecordName)
+	if err != nil {
+		log.Printf("NPM [%s] ERROR: %v", record.RecordName, err)
+		return
+	}
+	if existingHost == nil {
+		err := npmClient.createProxyHost(record, forwardHost)
 		if err != nil {
-			log.Printf("CERT [%s] ERROR: Could not describe certificate: %v", domainName, err)
-			return
+			log.Printf("NPM [%s] ERROR: %v", record.RecordName, err)
 		}
-		if len(descOut.Certificate.DomainValidationOptions) > 0 {
-			validationOption = &descOut.Certificate.DomainValidationOptions[0]
-			if validationOption.ResourceRecord != nil {
-				break
-			}
-		}
-		log.Printf("CERT [%s]: Validation details not yet available, waiting 30 seconds...", domainName)
-		time.Sleep(30 * time.Second)
+	} else {
+		log.Printf("NPM [%s]: Proxy host already exists. Skipping creation.", record.RecordName)
 	}
-	if validationOption == nil || validationOption.ResourceRecord == nil {
-		log.Printf("CERT [%s] ERROR: Timed out waiting for ACM validation details.", domainName)
-		return
-	}
-
-	validationRecord := validationOption.ResourceRecord
-	err = updateRoute53Record(ctx, r53Client, record.ZoneID, *validationRecord.Name, string(validationRecord.Type), *validationRecord.Value)
-	if err != nil {
-		log.Printf("CERT [%s] ERROR: Failed to create DNS validation record: %v", domainName, err)
-		return
-	}
-	
-	// 5. Wait for validation to complete
-	log.Printf("CERT [%s]: DNS validation record created. Waiting for ACM to validate...", domainName)
-	waiter := acm.NewCertificateValidatedWaiter(acmClient)
-	err = waiter.Wait(ctx, &acm.DescribeCertificateInput{CertificateArn: &certArn}, certValidationWait)
-	if err != nil {
-		log.Printf("CERT [%s] ERROR: Certificate validation failed or timed out: %v", domainName, err)
-		return
-	}
-	
-	// 6. Store the final ARN
-	log.Printf("CERT [%s]: Certificate successfully validated and issued!", domainName)
-	if err := storeString(certStateFile, certArn); err != nil {
-		log.Printf("CERT [%s] ERROR: Certificate issued but failed to store ARN: %v", domainName, err)
-	}
-	log.Printf("CERT [%s]: Certificate management process complete.", domainName)
 }
 
 // --- Main Application Logic ---
@@ -244,6 +248,10 @@ func loadConfig() (*AppConfig, error) {
 	return &AppConfig{
 		SleepTime:       sleepTime,
 		RecordsToUpdate: records,
+		NPMBaseURL:      os.Getenv("NPM_URL"),
+		NPMIdentity:     os.Getenv("NPM_IDENTITY"),
+		NPMSecret:       os.Getenv("NPM_SECRET"),
+		ForwardHost:     os.Getenv("FORWARD_HOST_IP"),
 	}, nil
 }
 
@@ -259,14 +267,15 @@ func runDDNSLoop(ctx context.Context, appConfig *AppConfig, r53Client *route53.C
 				log.Printf("DDNS: IP address has changed to %s. Updating all 'A' records...", publicIP)
 				allUpdated := true
 				for _, record := range appConfig.RecordsToUpdate {
-					if err := updateRoute53Record(ctx, r53Client, record.ZoneID, record.RecordName, "A", publicIP); err != nil {
-						log.Printf("DDNS ERROR: %v", err)
+					if err := updateRoute53Record(ctx, r53Client, record.ZoneID, record.RecordName, publicIP); err != nil {
+						log.Printf("DDNS ERROR for %s: %v", record.RecordName, err)
 						allUpdated = false
 					}
 				}
 				if allUpdated {
+					log.Println("DDNS: All records updated successfully. Storing new IP.")
 					if err := storeString(ipStateFile, publicIP); err != nil {
-						log.Printf("DDNS ERROR: %v", err)
+						log.Printf("DDNS ERROR: Failed to store new IP: %v", err)
 					}
 				}
 			} else {
@@ -279,7 +288,7 @@ func runDDNSLoop(ctx context.Context, appConfig *AppConfig, r53Client *route53.C
 }
 
 func main() {
-	log.Println("Starting Go Dynamic DNS updater script...")
+	log.Println("Starting Go Dynamic DNS, TLS, and Proxy automation script...")
 	var wg sync.WaitGroup
 
 	appConfig, err := loadConfig()
@@ -291,9 +300,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: Failed to load AWS config: %v", err)
 	}
-
 	r53Client := route53.NewFromConfig(awsCfg)
-	acmClient := acm.NewFromConfig(awsCfg)
+
+	var npmClient *NpmClient
+	if appConfig.NPMBaseURL != "" && appConfig.NPMIdentity != "" {
+		npmClient, err = NewNpmClient(appConfig.NPMBaseURL, appConfig.NPMIdentity, appConfig.NPMSecret)
+		if err != nil {
+			log.Printf("FATAL: Could not connect to Nginx Proxy Manager: %v. Proxy features will be disabled.", err)
+		}
+	}
 
 	// Goroutine for the continuous DDNS loop
 	wg.Add(1)
@@ -302,19 +317,23 @@ func main() {
 		runDDNSLoop(context.Background(), appConfig, r53Client)
 	}()
 
-	// Launch a separate, one-time certificate management goroutine FOR EACH record with tls: true
+	// Launch one-time proxy setup tasks for each record
 	for _, record := range appConfig.RecordsToUpdate {
-		if record.TLS {
-			// Create a new variable for the goroutine to avoid closure issues
-			rec := record
+		// Manage Nginx Proxy if port is specified and NPM is configured
+		if record.Port > 0 && npmClient != nil {
+			rec := record // Create a new variable for the goroutine to avoid closure issues
+			if appConfig.ForwardHost == "" {
+				log.Printf("NPM [%s]: Skipping proxy setup because FORWARD_HOST_IP is not set.", rec.RecordName)
+				continue
+			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				manageCertificateLifecycle(context.Background(), rec, r53Client, acmClient)
+				manageNginxProxy(rec, npmClient, appConfig.ForwardHost)
 			}()
 		}
 	}
 
-	log.Println("Application running. DDNS loop is active.")
+	log.Println("Application running. All startup tasks launched.")
 	wg.Wait()
 }
