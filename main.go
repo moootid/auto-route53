@@ -140,8 +140,6 @@ func NewNpmClient(baseURL, identity, secret string) (*NpmClient, error) {
 			return npm, nil
 		}
 		log.Printf("NPM: Authentication failed (attempt %d/5), retrying in 15 seconds... Status: %s", i+1, resp.Status())
-		// Log URL and body for debugging
-		log.Printf("NPM: Request URL: %s, Body: %s", baseURL, authPayload)
 		time.Sleep(15 * time.Second)
 	}
 	return nil, fmt.Errorf("could not authenticate with Nginx Proxy Manager after several retries")
