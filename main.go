@@ -238,6 +238,8 @@ func loadConfig() (*AppConfig, error) {
 	if recordsJSON == "" {
 		return nil, fmt.Errorf("RECORDS_TO_UPDATE environment variable not set or empty")
 	}
+	// Replace single quotes with double quotes if needed
+    recordsJSON = strings.ReplaceAll(recordsJSON, "'", "\"")
 	var records []RecordConfig
 	if err := json.Unmarshal([]byte(recordsJSON), &records); err != nil {
 		return nil, fmt.Errorf("failed to parse RECORDS_TO_UPDATE JSON: %w", err)
