@@ -132,7 +132,15 @@ docker run -d \
   --name auto-route53 \
   --network npm_network \
   --restart unless-stopped \
-  --env-file .env \
+  -e AWS_ACCESS_KEY_ID=YOUR_AWS_ACCESS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=YOUR_AWS_SECRET_KEY \
+  -e AWS_REGION=us-east-1 \
+  -e SLEEP_TIME=300 \
+  -e RECORDS_TO_UPDATE=[{"zone_id":"Z0123456789ABCDEFGHIJ","record_name":"home.yourdomain.com","tls":true,"port":4000,"redirect_to_https":true},{"zone_id":"Z9876543210ZYXWVUTSRQ","record_name":"another.domain.com","port":4500}] \
+  -e NPM_URL=http://npm-app:81 \
+  -e NPM_IDENTITY=admin@example.com \
+  -e NPM_SECRET=changeme \
+  -e FORWARD_HOST_IP=127.0.0.1 \
   -v "$(pwd)/updater_data:/app/data" \
   moootid/auto-route53:latest
 ```
